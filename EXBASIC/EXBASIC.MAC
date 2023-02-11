@@ -1,0 +1,1927 @@
+	.z80
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;	
+;	MSX Gaming Cartridge BIOS
+;	Copyright @v9938
+;	23/01/20 Ver 1.0 	初版
+;	23/02/01 Ver 1.1 	オマケソフトを追加、
+;						_LEDPT系命令を追加
+;						hue/sat/val値の引数をReal型に変更した
+;	23/02/03 Ver 1.2 	_LEDA_PAUSE命令を追加
+;	
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;	
+;	Original File: exbasic.mac (from MSX Datapack Sample program)
+;	Skeleton expanded statement cartridge header/dispatcher/utilities
+;	Ver 1.0		Jey Suzuki (9/1/1987)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;
+;       BIOS entry
+;
+
+msxver		equ	002dh
+calslt		equ 001ch
+snsmat		equ	0141h
+calbas		equ	0159h
+chgcpu		equ	0180h
+
+;
+; BIOS未使用エリアをワークとして使用する。
+;
+
+TXTPAT		equ	0f3bbh
+;
+;		Math pack
+;
+frcsng		equ	2fb2h
+fcomp		equ	2f21h
+;
+;	BASIC interpreter routines
+;
+rom_error	equ	406fh	; 'xxxx error'
+rom_chrgtr	equ	4666h	; get next character from text
+rom_frmevl	equ	4c64h	; evaluate an expression (general purpose)
+rom_docnvf	equ	517ah	; type conversion
+rom_getin2	equ	520fh	; get an integer (-32768..32767) to DE
+rom_getbyt	equ	521ch	; get a byte (0..255) to A and E
+rom_frmqnt	equ	542fh	; get an integer (-32768..65535) to DE
+rom_ptrget	equ	5ea4h	; get a pointer to variable to DE
+rom_strini	equ	6627h	; make a room in string space
+rom_frestr	equ	67d0h	; get a pointer to string
+
+;
+;	Work area
+;
+buf	equ	0f55eh		; line input buffer (used as a temp)
+valtyp	equ	0f663h		; value type
+dsctmp	equ	0f698h		; string descriptor temp
+dac	equ	0f7f6h			; decimal accumulator
+procnm	equ	0fd89h		; name of procedure
+
+;
+;	Macros
+;
+synchk	macro	token
+	call	synchr
+	defb	token
+	nop	
+	endm
+
+syn2chk	macro	token
+	call	syn2chr
+	defb	token
+	nop	
+	endm
+
+chrget	macro
+	call	chrgtr
+	endm
+
+
+;
+;  LED Gamming Cassetteの通信フォーマット
+;  000h 043h 000h CMD番号 ... の順番でこのCassetteに書き込むことで実行する。
+;  bit0を1にしたデータを取り込む仕様なので、有効データは7bit分
+;  8bit分のデータを送信する場合は ([bit6-0],1),(000000b,[bit7],1)に分けて送信が必要です。
+;  Data-Data間は10us程度のWaitが必要、そのためLDIRは使えない
+;
+;  0x4020のServiceルーチンを実行する場合はそこら辺を意識する必要は無い。
+;  下記フォーマットでRAM上に置いてHLレジスタに先頭アドレス、BにByte数でCALLすればOK
+;  ※9Byte設定のみフォーマットが異なります。
+;  1byte指定は'[CMD番号]'
+;  2byte指定は'[CMD番号] [parameter1(7bit 0-127)]'
+;  4byte指定は'[CMD番号] [parameter1(7bit 0-127)] [parameter2(7bit 0-127)] [parameter3(7bit 0-127)]'
+;  9byte指定は'[CMD番号] [BCD float数値(4byte)]' ※内部で8Byteに変換します
+;
+;  AVR側のBufferは64ByteMaxなので時間がかかる命令(_LED_DRAW/_LED_DEMOなど）実行後は少し時間を空けてください。
+;  上限にあたると以降は無効CMD扱いになります
+
+
+
+; CMD番号一覧
+c_cmd_st   equ     043h	; CMDスタート識別子
+
+cl_debugen	equ		001h ; (1Byte) LED Debug UART On
+cl_off      equ     003h ; (1Byte) LED OFF/DEMO STOP
+cl_draw     equ     005h ; (1Byte) LED draw
+cl_pos      equ     007h ; (2Byte) LED position setting
+
+cl_pat      equ     009h ; (2Byte) LED pattern setting
+cl_eepinit  equ     00bh ; (1Byte) EEPROM Init
+cl_demo     equ     00dh ; (4Byte) LED DEMO
+cl_real     equ     00fh ; (9Byte) LED REAL Test
+
+
+cl_c_rgb    equ     011h ; (4Byte) RGB Coler code
+cl_c_hue    equ     013h ; (9Byte) HSV Coler code hue
+cl_c_sat    equ     015h ; (9Byte) HSV Coler code sat
+cl_c_val    equ     017h ; (9Byte) HSV Coler code val
+
+cl_p_hue    equ     019h ; (9Byte) Gradation Pattern hue step value
+cl_p_rep    equ     01bh ; (2Byte) LED pattern repeat value
+cl_a_ena	equ		01dh ; (1Byte) LED Animation enable
+cl_a_dis    equ		01fh ; (1Byte) LED Animation disable No15
+
+cl_a_hue    equ		021h ; (9Byte) HSV Animation hue    No16
+cl_a_sat    equ		023h ; (9Byte) HSV Animation sat    No17
+cl_a_val    equ		025h ; (9Byte) HSV Animation val    No18
+cl_a_pos    equ		027h ; (9Byte) HSV Animation pos    No19
+
+cl_a_modeh  equ		029h ; (2Byte) HSV AnimationMode hue   No20
+cl_a_modes  equ		02bh ; (2Byte) HSV AnimationMode sat   No21
+cl_a_modev  equ		02dh ; (2Byte) HSV AnimationMode val   No22
+cl_a_modep  equ		02fh ; (2Byte) HSV AnimationMode val   No23
+
+
+cl_p_sat	equ		031h ; (9Byte) Gradation Pattern sat step value   No24
+cl_p_val	equ		033h ; (9Byte) Gradation Pattern val step value   No25
+cl_p_aval	equ		035h ; (9Byte) Gradation Pattern all val value    No26
+cl_ee_set	equ		037h ; (2Byte) EEPROM Write No27
+
+cl_ee_get	equ		039h ; (2Byte) EEPROM Read No28
+cl_ee_cnf	equ		03bh ; (1Byte) EEPROM Config set No29
+cl_a_pause  equ		03dh ; (2Byte) AnimationMode pause No30
+
+ledmem_io	equ		07f00h ; LED Mem IO
+
+
+
+;
+;	Cartridge header
+;
+	defb	'AB'
+	defw	chgcpumode
+	defw	sttmnt
+	defw	0
+	defw	0
+	defw	0
+	defw	0
+	defw	0
+;
+; LED Cartridgeの識別子
+; 0x4010〜の文字列が'MSXLED"というスロットを探してください。
+;	
+	defb	'MSXLED'			; 識別子 'MSXLED'
+	defw	0100h				; Version情報
+
+	defw	0
+	defw	0
+	defw	0
+	defw	0
+	
+;
+; Service Routine
+; 0x4020 LEDCMD送信Routine
+;	LEDCartridgeにCMDを送信します。
+;       A   CMD番号
+;		B   CMDサイズ (通常は1/2/4/9)
+;		HL  送信CMDバッファーの先頭アドレス
+
+
+;JP Table1
+	jp		j_sendUserCMD
+	nop
+
+
+
+
+
+;JP Table2
+	ret
+	nop
+	nop
+	nop
+
+;JP Table3
+	ret
+	nop
+	nop
+	nop
+
+;JP Table4
+	ret
+	nop
+	nop
+	nop
+
+
+
+
+
+	ds		0A0h,00h
+	
+; 不動小数点計算の為にBIOS内部でMath-Packを使っている
+; Math-Pack自体はPage0に呼び出し先があるが、Page1に一部Routineが
+; 喰いこんでいるのでPatchを当てないと正常に動かない。
+; ※M80は領域を上書きしても警告が出ないので文字列を付与しています。
+;
+;	Math-Pack fixed patch 406fh
+;
+	ORG 06fh
+	ld	ix,406fh
+	jp	calbas
+	defb	'Math-PackPatch1/4',00
+
+;
+; 自己主張
+;
+
+	ORG 0C0h
+	defb	'MSX Gaming Cartridge BIOS v1.20 23/02/03 @v9938',00
+	ds		16,00h
+
+;
+; INIT Routine オマケソフト
+; R800モード切替: [2]キーを押しながら起動するとR800モードで起動出来る
+;
+
+chgcpumode:
+	xor a				; LS373を初期化(拡張SLTアクセスで上書きされるのでイマイチ)
+	ld (ledmem_io),a	; Control Address reset
+
+	ld a,(msxver)		; ROM VERSION CHECK
+	cp 3				; MSX2+までは戻る
+	ret c
+	
+	xor a				; KEYマトリクスの0を指定
+	call snsmat			; KEYマトリクスの状態チェック
+	and 04h				; [2]KEYが押されているか？
+	ret nz				; 押されていない場合は戻る
+	
+	ld a,082h			; R800 DRAM mode
+	call chgcpu
+	ret
+	
+; オマケソフトここまで
+; 
+
+; Call文の文字列チェック
+; 当該命令が自分が処理すべき命令かをチェック
+; (MSX Datapackのサンプルプログラム exbasic.macより）
+;
+sttmnt:
+	ei					; インタースロットでのCallは割禁で来る時があるのでei
+	push	hl			; BASICのtext pointerを保存
+	ld	hl,command		; CMD文字列の先頭
+ckcmd1:
+	ld	de,procnm		; BASICの命令デコードワーク先頭
+ckcmd2:
+	ld	a,(de)			; 1文字比較に挑戦、命令デコードワークから1文字Get
+	cp	(hl)			; テーブルの文字を比較
+	jr	nz,notcmd		; 不一致なので次のCMD文字列を比較
+	inc	de				; 次の文字比較準備
+	inc	hl				
+	and	a				; end of name?
+	jr	nz,ckcmd2		; 文字終わっていないから更に比較
+	ld	e,(hl)			; 実行アドレスをGet
+	inc	hl				
+	ld	d,(hl)
+	pop	hl	 			; BASICのtext pointerをCall先に渡す
+	call	jpde		; 各命令に分岐
+	and	a				; ncを当該CALLは実行済みとして返す
+	ret
+;
+jpde:
+	push	de			; stackに詰んで、飛ぶ
+	ret
+;
+notcmd:
+	ld	c,0ffh			; 当該データのEND(NULL)を探す
+	xor	a				; A=00
+	cpir				; Search
+	inc	hl				; 次のデータを見る準備
+	inc	hl
+	cp	(hl)			; 次のデータがEOL(0xFF)かをチェック
+	jr	nz,ckcmd1		; 違うので次のCMDをチェックする。
+	pop	hl				; BASICのポインタを戻す
+	scf					; CARRYをセット、この命令は自分では無いと返す。
+	ret
+
+;
+;	Statement table
+;	テーブルのCommandは大文字で書くこと
+;	<format>
+;		defb	<statement_name>,0	<- in upper case
+;		defw	<execute_address>
+;			.
+;			.
+;		defb	0			<- end of table
+;
+command:
+;	defb	'FOO',0
+;	defw	foo
+;	defb	'BAR',0
+;	defw	bar
+;	defb	'LED_INIT',0
+;	defw	ledinit
+	defb	'LED_DEBUG',0
+	defw	led_debug
+	defb	'LED_OFF',0
+	defw	ledoff
+	defb	'LED_DRAW',0
+	defw	leddraw
+	defb	'LED_POS',0
+	defw	ledpos
+	defb	'LED_PT',0
+	defw	ledpt
+	defb	'LED_DEMO',0
+	defw	leddemo
+	defb	'LED_DEMOON',0
+	defw	setdemo
+	defb	'LED_DEMOOFF',0
+	defw	leddoff
+	defb	'LED_SAVEINIT',0
+	defw	leds_init
+	defb	'LEDC_RGB',0
+	defw	ledcrgb
+	defb	'LEDC_HUE',0
+	defw	ledchue
+	defb	'LEDC_SAT',0
+	defw	ledcsat
+	defb	'LEDC_VAL',0
+	defw	ledcval
+	defb	'LEDPT_HUE',0
+	defw	ledpthue
+	defb	'LEDPT_SAT',0
+	defw	ledptsat
+	defb	'LEDPT_VAL',0
+	defw	ledptval
+	defb	'LEDPT_AVAL',0
+	defw	ledptaval
+	defb	'LEDPT_REP',0
+	defw	ledptrep
+	defb	'LED_TEST',0
+	defw	ledtest
+	defb	'LED_REAL',0
+	defw	ledreal
+	defb	'LEDA_ON',0
+	defw	leda_on
+	defb	'LEDA_OFF',0
+	defw	leda_off
+	defb	'LEDA_PAUSE',0
+	defw	leda_pause
+	defb	'LEDA_HUE',0
+	defw	leda_hue
+	defb	'LEDA_SAT',0
+	defw	leda_sat
+	defb	'LEDA_VAL',0
+	defw	leda_val
+	defb	'LEDA_POS',0
+	defw	leda_pos
+	defb	'LEDPT_SAVE',0
+	defw	ledpt_save
+	defb	'LEDPT_LOAD',0
+	defw	ledpt_load
+	
+	defb	0		; end of table
+
+;
+;	Text handlers
+;
+
+; 文法チェックルーチン、違った場合はSyntax Error
+synchr:
+	ld	a,(hl)		; get text
+	ex	(sp),hl
+	cp	(hl)		; compare with correct token
+	inc	hl
+	ex	(sp),hl
+	jr	nz,snerr	; no match, error
+chrgtr:
+	ld	ix,rom_chrgtr
+	call	calbas
+	ei
+	ret
+
+; 文法チェックルーチン、違った場合はNZで戻る
+syn2chr:
+	ld	a,(hl)		; get text
+	ex	(sp),hl
+	cp	(hl)		; compare with correct token
+	inc	hl
+	ex	(sp),hl
+	jr z,chrgtr		; PASS次の文字へ
+	scf
+	ret				; no match, 戻る
+
+
+;
+;	Error handlers
+;
+errsn   equ     2		; syntax error
+errod   equ     4		; Out of DATA
+errfc   equ     5		; illegal function call
+errom   equ     7		; out of memory
+errtm   equ     13		; type mismatch
+errdio  equ     19		; device I/O error
+
+; Error Type mismatch
+tmerr:
+	ld	e,errtm
+	ld	ix,rom_error
+	jr	jcalbas
+
+; illegal function call
+fcerr:
+	ld	e,errfc
+	ld	ix,rom_error
+	jr	jcalbas
+
+; syntax error
+snerr:
+	ld	e,errsn
+	ld	ix,rom_error
+	jr	jcalbas
+
+; Out of DATA
+oderr:
+	ld	e,errod
+	ld	ix,rom_error
+	jr	jcalbas
+
+;
+;	Interface routines between ROM BASIC routines
+;	BASICはPage0/1が同一SLTであることを前提にしているので、
+;	calbasを経由して処理させる必要がある。
+;
+strini:
+	ld	ix,rom_strini
+	jr	jcalbas
+
+ptrget:
+	ld	ix,rom_ptrget
+	jr	jcalbas
+
+docnvf:
+	ld	ix,rom_docnvf
+	jr	jcalbas
+
+frmevl:
+	ld	ix,rom_frmevl
+	jr	jcalbas
+
+frestr:
+	ld	ix,rom_frestr
+	jr	jcalbas
+frmqnt:
+	ld	ix,rom_frmqnt
+	jr	jcalbas
+
+getbyt:
+	ld	ix,rom_getbyt
+jcalbas:
+	call	calbas		; call ROM routines
+	ei
+	ret
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	Your statement handler comes here
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	To demonstrate the usage of system routines, two sample
+;	statements are shown below. One is 'FOO', the other 'BAR'.
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+;
+; 書き込みのWait処理
+; Arduino(@16MHz)では割り込み応答に通常3us/タイマー割り込みと被ると8us程度の時間が必要
+; そのため10us程度Waitを入れている。TRだと微妙に早いが気にしない (35clock程度有ればOK）
+; BUFFERは128byte分用意してあるが、UARTDebugモードなどArduinoの処理時間がかかる場合は
+; あふれる可能性がある。（最大まで行った場合は強制的にclearする仕様)
+; 
+; 00書き込み側には本来不要だが、CMD-CMDは15us程度の間隔が無いと取りこぼしが発生するので注意
+; そのためこのドライバーでは00でもウェイトを入れている。
+
+write_wait:
+	nop
+	nop
+	nop
+	nop
+	nop
+	ret
+
+;
+; 各CMD 送信
+; ROM容量が余っているのでSPを消費しないようにベタ書きしています。
+
+;
+; 1ByteCMD送信ルーチン
+; 1st CMD = e
+;
+send_cmd1byte:
+	ld hl,ledmem_io		; Control Address
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld a,c_cmd_st		; CMDSET 1st set (Start CMD)
+	ld (hl),a			;
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),e			; CMDSET 2nd LED CMDの送信
+	call write_wait
+	ret
+;
+; 2ByteCMD送信ルーチン
+; 1st CMD = e
+; 2nd CMD = b
+;
+
+send_cmd2byte:
+	ld hl,ledmem_io		; Control Address
+	ld (hl),l
+	call write_wait
+	ld a,c_cmd_st		; CMDSET 1st set (Start CMD)
+	ld (hl),a
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),e			; CMDSET 2nd LED CMDの送信
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),b			; CMDSET 3rd LED CMDの送信
+	call write_wait
+	ret
+
+;
+; 3ByteCMD
+;
+; 1st CMD = e
+; 2nd CMD = b
+; 3rd CMD = c
+;
+send_cmd3byte:
+	ld hl,ledmem_io		; Control Address
+	ld (hl),l
+	call write_wait
+	ld a,c_cmd_st		;CMDSET 1st set (Start CMD)
+	ld (hl),a
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),e			; CMDSET 2nd LED CMDの送信
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),b			; CMDSET 3rd LED CMDの送信
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),c			; CMDSET 4th LED CMDの送信
+	call write_wait
+	ret
+
+;
+; 4ByteCMD
+;
+; 1st CMD = e
+; 2nd CMD = b
+; 3rd CMD = c
+; 4th CMD = d
+
+send_cmd4byte:
+	ld hl,ledmem_io		; Control Address
+	ld (hl),l
+	call write_wait
+	ld a,c_cmd_st		;CMDSET 1st set (Start CMD)
+	ld (hl),a
+send_4byte:
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),e			; CMDSET 2nd LED CMDの送信
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),b			; CMDSET 3rd LED CMDの送信
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),c			; CMDSET 4th LED CMDの送信
+	call write_wait
+	ld (hl),l			; 0x00を送信
+	call write_wait
+	ld (hl),d			; CMDSET 5th LED CMDの送信
+	call write_wait
+	ret
+
+send2a:
+	push af				; bit7の処理用にデータを残す
+	scf					; 0bit目は割り込み通知で使うので必ず1
+	rla					; 1bit Left shift
+	ld (hl),l			; 0x00データ送信
+	call write_wait
+
+	ld (hl),a			; bit6-0のデータを送信
+	call write_wait
+
+
+	pop af				; bit7の処理がしたいからデータを戻す
+	rlca				; 左シフト(bit7>bit0)
+	scf					;
+	rla					; 左シフト(bit7>bit1)
+	and 3				; 余分のデータをマスク
+
+	ld (hl),l			; 0x00データ送信
+	call write_wait
+
+	ld (hl),a			; bit7データ送信
+	call write_wait
+	ret
+
+
+send_val4byte:
+	ld de,dac
+send_buf4byte:
+	ld hl,ledmem_io		; Control Address
+	ld b,4
+send_real:
+	ld a,(de)
+	call send2a
+	inc de
+	djnz send_real
+	ret
+
+j_sendUserCMD:
+	push hl					; Buffer先頭アドレス
+	push af					; CMD番号
+
+	ld hl,ledmem_io			; Control Address
+	ld (hl),l				; 0x00をとりあえず送る
+	call write_wait
+	
+	ld a,c_cmd_st			; CMDSET 1st set (Start CMD)
+	ld (hl),a
+	call write_wait
+
+	ld (hl),l				; 0x00送信
+	call write_wait
+
+	pop af					; CMDSET 2nd  (LED CMD)
+	ld (hl),a
+	call write_wait
+
+	pop de					; Buffer address
+	ld a,9					; 9Byteフォーマットだけfloat 4Byteを8Byteにする処理があるので別ルーチン
+	cp b					;
+	jr z,send_buf4byte		; float BCDフォーマット送信ルーチンへ
+	jr SendUserData
+
+l_SendUserData:
+	ld (hl),l				; 0x00送信
+	call write_wait
+
+	ld a,(de)				; 送信Dataをロード
+	scf						;
+	rla						; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld (hl),a				; Data 送信
+	call write_wait
+	inc de					; バッファーアドレスを更新
+
+SendUserData:
+	djnz l_SendUserData
+	ret
+
+
+;
+;	<syntax>
+;		_LED_DEBUG(<0-1>)
+;	0 : デバッグメッセージ OFF
+;	1 : デバッグメッセージ ON
+;
+;	<function>
+;		LED DEBUG UARTを表示を有効化します。
+;
+
+led_debug:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 2				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld e,cl_debugen		;LED Debug enable
+	call send_cmd2byte  ;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+
+
+
+;
+;	<syntax>
+;		_LED_OFF
+;
+;	<function>
+;		LEDを消灯します。
+;
+
+ledoff:
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+
+;	ld e,cl_a_dis		;Animation OFF
+;	call send_cmd1byte	;CMD送信
+
+	ld e,cl_off			;CMDSET LED OFF/DEMO STOP
+	call send_cmd1byte  ;CMD送信
+
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LED_DRAW
+;
+;	<function>
+;		LEDを描画します。
+;
+
+leddraw:
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld e,cl_draw		;LED draw
+	call send_cmd1byte  ;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+
+;
+;	<syntax>
+;		_LED_POS (<led location 0-9>)
+;	<function>
+;		描画するLEDのポジションを設定します。左から0,1,2...になります
+;
+ledpos:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 10				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+	ld e,cl_pos			;LED position setting
+	call send_cmd2byte	;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LED_PT (<pattern>)
+;
+;	LEDの表示パターン
+;	0 : パターンSingle ... 全LED単一色の塗り潰しです。
+;	1 : パターンGrad   ... 色相グラデーションパターン1 (100%パターン)
+;	2 : パターンSym    ... 色相グラデーションパターン2 (50%パターン)
+;	3 : パターンPoint1 ... LED1灯のみ光らせるパターン(他は消灯)
+;	4 : パターンPoint2 ... LED1灯のみデータ更新するパターン(他は前の状態を維持)
+;	<function>
+;		描画するLEDパターンを定義します。
+
+;
+ledpt:
+	synchk	'('		; 括弧があるかチェック
+	call	getbyt	; 引数(数値)を取得
+	cp 5			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a			; 引数保存
+
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld e,cl_pat			;LED pattern setting
+	call send_cmd2byte	;CMD送信
+
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LED_DEMO (<pattern>,[End Pattern],[Demo time])
+;
+;	デモパターン
+;	0 :    パターンSingle ... 全LED単一色の塗り潰しです。
+;	1 :    パターンGrad   ... 色相グラデーションパターン1 (100%パターン)
+;	2 :    パターンSym    ... 色相グラデーションパターン2 (50%パターン)
+;	3 :    パターンPoint1 ... LED1灯のみ光らせるパターン(他は消灯)
+;	4 :    パターンPoint2 ... LED1灯のみデータ更新するパターン(他は前の状態を維持)
+;	5〜9 : ユーザパターン ... ユーザparameter0-4で保存した値
+;
+;	
+;
+
+;	<function>
+;		LEDのデモを実行します。
+;
+leddemo:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 10				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	ld c,01h
+	ld d,c
+	
+	syn2chk	','			;カンマのチェック
+	jr c,j_leddemo
+	push bc
+	call	getbyt		; 引数(数値)を取得
+	pop bc
+	cp 10				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld c,a				; 引数保存
+
+	ld d,01h
+
+	syn2chk	','			;カンマのチェック
+	jr c,j_leddemo
+	push bc
+	call	getbyt	; 引数(数値)を取得
+	pop bc
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld d,a			; 引数保存
+	
+
+j_leddemo:
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+
+	ld e,cl_demo		;LED DEMO
+	call send_cmd4byte	;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LED_DEMOON
+;
+;	<function>
+;		現在の設定値でLEDのデモを設定します。電源を入れておくと次回も勝手にスタートします。
+;
+setdemo:
+	push hl			; hlは壊してはいけない/SPは-1してもOK
+					; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld e,cl_a_ena		;Animation ON
+	call send_cmd1byte	;CMD送信
+
+	ld e,cl_ee_cnf		;EEPROM SAVE
+	call send_cmd1byte	;CMD送信
+
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LED_DEMOOFF
+;
+;	<function>
+;		LEDのデモ設定を切ります。
+;
+leddoff:
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+	ld e,cl_off			;LED OFF
+	call send_cmd1byte	;CMD送信
+
+	ld e,cl_a_dis		;Animation OFF
+	call send_cmd1byte	;CMD送信
+	ld e,cl_ee_cnf		;EEPROM SAVE
+	call send_cmd1byte	;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LED_SAVEINIT
+;
+;	<function>
+;		LEDのユーザ設定値を初期値に戻します。
+;
+leds_init:
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+	ld e,cl_off			;LED OFF
+	call send_cmd1byte	;CMD送信
+	ld e,cl_eepinit		;EEPROM SAVE
+	call send_cmd1byte	;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+
+;
+;	<syntax>
+;		_LEDC_RGB (r,g,b)
+;
+;	r = Red   (0-127)
+;	g = Green (0-127)
+;	b = Blue  (0-127)
+;
+;	<function>
+;		RGB値でカラーコードを設定します。システム内部ではHSV方式で管理しているため
+;		_LEDC_HUE/SAT/VALで設定される値は上書きされます。
+;
+ledcrgb:
+	synchk	'('		; 括弧があるかチェック (aは破壊される）
+	call	getbyt	; 引数(数値)を取得
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a			; 引数保存
+
+	synchk	','		; 括弧があるかチェック
+
+	push bc
+	call	getbyt	; 引数(数値)を取得
+	pop bc
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld c,a			; 引数保存
+
+	synchk	','		; 括弧があるかチェック
+
+	push bc
+	call	getbyt	; 引数(数値)を取得
+	pop bc
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld d,a			; 引数保存
+
+	synchk	')'
+
+	push hl
+	ld e,cl_c_rgb		;RGB Coler code
+						;ebcdの順
+	call send_cmd4byte	;CMD送信
+	pop hl
+	ret
+
+;
+;	<syntax>
+;		_LEDC_HUE(<hue>)
+;
+;	hue = 色相 0-360
+;
+;	<function>
+;		HSV方式の色相を設定します。
+;
+
+ledchue:
+	synchk	'('		; 括弧があるかチェック (aは破壊される）
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,3643h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_c_hue		; bcd float cmd
+	call send_cmd1byte	; CMD送信
+	call send_val4byte  ; 引数送信
+	pop hl
+	ret
+
+
+
+;
+;	<syntax>
+;		_LEDC_SAT (<sat>)
+;
+;		sat = 色の濃さ 0-100
+;	<function>
+;		HSV方式の色の濃さを設定します。
+
+;
+ledcsat:
+	synchk	'('		; 括弧があるかチェック
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_c_sat		;bcd float cmd
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+;
+;	<syntax>
+;		_LEDC_VAL (<val>)
+;
+;		sat = 明るさ 0-100
+;	<function>
+;		HSV方式の明るさを設定します。
+;
+ledcval:
+	synchk	'('		; 括弧があるかチェック
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_c_val		;bcd float cmd
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+;ledcval:
+;	synchk	'('		; 括弧があるかチェック
+;	call	getbyt	; 引数(数値)を取得
+;	cp 101			; 引数チェック
+;	jp nc,oderr		; 引数が範囲外なのでError
+;	scf				;
+;	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+;	ld b,a			; 引数保存
+;
+;	synchk	')'
+;	push hl				; hlは壊してはいけない/SPは-1してもOK
+;						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+;
+;	ld e,cl_c_val		;HSV Coler code val
+;	call send_cmd2byte	;CMD送信
+;
+;	pop	hl				; restore type of variable
+;	ret
+
+
+;
+;	<syntax>
+;		_LEDPT_HUE(<hue>)
+;
+;	hue = 色相 0-360
+;
+;	<function>
+;		グラデーションパターン時の色相の変化量を指定します。
+;
+
+ledpthue:
+	synchk	'('		; 括弧があるかチェック (aは破壊される）
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,3643h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_p_hue		;bcd float cmd
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+
+
+;
+;	<syntax>
+;		_LEDPT_REP (0-10)
+;	<function>
+;		描画するLEDの模様の繰り返し回数を設定します
+;
+ledptrep:
+	synchk	'('		; 括弧があるかチェック
+	call	getbyt	; 引数(数値)を取得
+	cp 11			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+					; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	
+	or a			;
+	jr nz,repnum_fixed
+	ld a,1			; 0を設定した場合は1扱い
+repnum_fixed:		; 
+	scf				; 
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a			; 引数保存
+	synchk	')'
+	push hl			; hlは壊してはいけない/SPは-1してもOK
+
+	ld e,cl_p_rep		;LED position setting
+	call send_cmd2byte	;CMD送信
+
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LEDTEST (<val>)
+;
+;		引数：val = 0-127
+;	<function>
+;		テスト用当該スロットに1Byteデータ書き込みを実施します。
+;		通信の仕様上7bit分しか通信できません
+;
+ledtest:
+	synchk	'('		; 括弧があるかチェック
+	call	getbyt	; 引数(数値)を取得
+	cp 101			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a			; 引数保存
+
+	synchk	')'
+	push hl			; hlは壊してはいけない/SPは-1してもOK
+					; (ルーチン終了時にhlのデータが00な事をチェックしている)
+
+	ld hl,ledmem_io	; Control Address
+	ld (hl),b
+	call write_wait
+
+	ld (hl),l
+	pop	hl				; restore type of variable
+	ret
+
+
+;	※M80は領域を上書きしても警告が出ないので注意
+;	Math-Pack fixed patch 4666h
+;
+	ORG 0666h
+	jp	calbas
+	defb	'Math-PackPatch2/4',00
+
+	ORG 0680h
+
+
+;
+;	<syntax>
+;		_LED_REAL (<val>)
+;
+;		引数：val = 0-360
+;	<function>
+;		クロスチェック用のテストコマンド、
+;		Debugを有効にすると内部値がUARTに出力されます
+;
+
+
+ledreal:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,3643h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_real		;bcd float cmd
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+
+
+
+;
+;	<syntax>
+;		_LEDA_ON
+;
+;	<function>
+;		今設定しているparameter値に合わせてアニメーションを実行します。
+;
+leda_on:
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+	ld e,cl_a_ena		;Animation ON
+	call send_cmd1byte	;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LEDA_OFF
+;
+;	<function>
+;		アニメーションを停止とします。(LEDは、点灯状態)
+;
+leda_off:
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+	ld e,cl_a_dis		;Animation OFF
+	call send_cmd1byte	;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+
+;
+;	<syntax>
+;		_LEDA_HUE (<mode>,<val>)
+;
+;		引数：	mode = 0 値がMAXなったら0に戻ります
+;				mode = 1 値がMAXになったマイナスされ、0になると元に戻ります。
+;				val = -360.000-360.000
+;	<function>
+;		16ms毎のHUE値の変化量と変化の仕方を設定します。
+;
+
+
+leda_hue:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	
+	call	getbyt		; 引数(数値)を取得
+	cp 2				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	','			; カンマがあるかチェック
+	
+	push bc
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	pop bc
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,3643h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	ld bc,36C3h		; 引数のチェック
+	ld de,0000h		; real型-360
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_a_modeh		;LED pattern setting
+	call send_cmd2byte	;CMD送信
+
+	ld e,cl_a_hue		;CMD
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+
+;
+;	<syntax>
+;		_LEDA_SAT (<mode>,<val>)
+;
+;		引数：	mode = 0 値がMAXなったら0に戻ります
+;				mode = 1 値がMAXになったマイナスされ、0になると元に戻ります。
+;				val = -100.000-100.000
+;	<function>
+;		16ms毎のSAT値の変化量と変化の仕方を設定します。
+;
+
+
+leda_sat:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	
+	call	getbyt		; 引数(数値)を取得
+	cp 2				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	','			; カンマがあるかチェック
+	
+	push bc
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	pop bc
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型100
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	ld bc,10C3h		; 引数のチェック
+	ld de,0000h		; real型-100
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < -100 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_a_modes		;LED pattern setting
+	call send_cmd2byte	;CMD送信
+
+	ld e,cl_a_sat		;CMD
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+
+
+
+
+;
+;	<syntax>
+;		_LEDA_VAL (<mode>,<val>)
+;
+;		引数：	mode = 0 値がMAXなったら0に戻ります
+;				mode = 1 値がMAXになったマイナスされ、0になると元に戻ります。
+;				val = -100.000-100.000
+;	<function>
+;		16ms毎のVAL値の変化量と変化の仕方を設定します。
+;
+
+
+leda_val:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	
+	call	getbyt		; 引数(数値)を取得
+	cp 2				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	','			; カンマがあるかチェック
+	
+	push bc
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	pop bc
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型100
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	ld bc,10C3h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < -100 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_a_modev		;LED pattern setting
+	call send_cmd2byte	;CMD送信
+
+	ld e,cl_a_val		;CMD
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+
+
+
+
+;
+;	<syntax>
+;		_LEDA_POS (<mode>,<val>)
+;
+;		引数：	mode = 0 値がMAXなったら0に戻ります
+;				mode = 1 値がMAXになったマイナスされ、0になると元に戻ります。
+;				val = -100.000-100.000
+;	<function>
+;		16ms毎のPOS値の変化量と変化の仕方を設定します。
+;
+
+
+leda_pos:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	
+	call	getbyt		; 引数(数値)を取得
+	cp 2				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	','			; カンマがあるかチェック
+	
+	push bc
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	pop bc
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型100
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	push bc
+	ld bc,10c3h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop bc
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < -100 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_a_modep		;LED pattern setting
+	call send_cmd2byte	;CMD送信
+
+	ld e,cl_a_pos		;CMD
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+;
+;	<syntax>
+;		_LEDPT_SAT (<val>)
+;
+;		引数：val = 0-100
+;	<function>
+;		LEDのグラデーションパターン時のSAT値の変化量を設定します。
+;
+
+
+ledptsat:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_p_sat		;cmd
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+
+;
+;	<syntax>
+;		LEDPT_VAL (<val>)
+;
+;		引数：val = 0-100
+;	<function>
+;		LEDのグラデーションパターン時のVAL値の変化量を設定します。
+;
+
+
+ledptval:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_p_val		;real Test cmd
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+;
+;	<syntax>
+;		LEDPT_AVAL (<val>)
+;
+;		引数：val = 0-100
+;	<function>
+;		LED patternのVAL100%時の明るさを設定します。
+;
+
+
+ledptaval:
+					; 文法構文のチェック
+	synchk	'('		; 括弧があるかチェック
+	call	frmevl	; evaluate the expression
+	ld	a,(valtyp)	; is it string?
+	cp	3
+	jp	z,tmerr		; no, 'Type mismatch' error
+
+					; プラス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	call frcsng		; realにvalを変更
+					; 
+	ld bc,1043h		; 引数のチェック
+	ld de,0000h		; real型360
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 1			; val > 360?
+	jp z,oderr		; 引数が範囲外なのでError
+
+					; マイナス側の値のチェック
+	push hl			; BASICの文字列ポインターを保存
+	ld bc,0000h		; 引数のチェック
+	ld de,0000h		; real型0
+	call fcomp		; MathPackでcbed と valを比較
+	pop hl			; BASICの文字列ポインタを復帰
+	cp 255			; val < 0 
+	jp z,oderr		; 引数が範囲外なのでError
+
+	synchk	')'		; 括弧があるかチェック
+	;
+	push hl
+	ld e,cl_p_aval		;real Test cmd
+	call send_cmd1byte	;CMD送信
+	call send_val4byte  ;引数送信
+	pop hl
+	ret
+
+
+;
+;	<syntax>
+;		LEDPT_SAVE (<val>)
+;
+;		引数：val = 0-4 保存番号
+;	<function>
+;		ユーザパターンをEEPROMに保存します。
+;		保存した値はパターン5-9として使用できます。
+;
+ledpt_save:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 5				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld e,cl_ee_set		;LED eeprom save user pattern
+	call send_cmd2byte  ;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		LEDPT_LOAD (<val>)
+;
+;		引数：val = 0-4 保存番号
+;	<function>
+;		ユーザパターンをEEPROMからロードします。
+;
+ledpt_load:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 5				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld e,cl_ee_get		;LED eeprom load user pattern
+	call send_cmd2byte  ;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LEDA_PAUSE(<Value>)
+;
+;		引数：	val = 0 Animation動作　再開
+;				val = 1 Animation動作　PAUSE
+;	
+;	<function>
+;		Animation機能を一次的に停止します。
+;		停止時のLEDC系とLED_POS値が保存され、再開時の戻します。
+;		LEDPT系のParameterは保存されないので注意
+;
+leda_pause:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 2				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld e,cl_a_pause		;LED Animation Pauseeeprom load user pattern
+	call send_cmd2byte  ;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+
+; Serviceルーチン TEST Code
+led_sendTest2b:
+	push hl
+	ld a,cl_real
+	ld b,9
+	ld hl,data2byte
+	call 04020h
+	pop hl
+	ret
+data2byte:
+	defw	01234h
+
+
+led_sendTest4b:
+	push hl
+	ld a,cl_c_rgb
+	ld b,4
+	ld hl,data4byte
+	call 04020h
+	pop hl
+	ret
+
+data4byte:
+	defb	01h,03h,05h,07h
+
+led_sendTest1b:
+	push hl
+	ld a,cl_pat
+	ld b,2
+	ld hl,data1byte
+	call 04020h
+	pop hl
+	ret
+
+data1byte:
+	defb	09h
+	
+led_sendTest0b:
+	push hl
+	ld a,cl_draw
+	ld b,1
+	ld hl,data2
+	call 04020h
+	pop hl
+	ret
+
+
+;	※M80は領域を上書きしても警告が出ないので注意
+;	Math-Pack fixed patch 5597h
+;
+	ORG 1597h
+getypr:
+	ld	a,(valtyp)
+	cp	8
+	jr nc,double
+	sub	3
+	or	a
+	scf
+	ret
+;
+double:
+	sub	3
+	or	a
+	ret
+	defb	'Math-PackPatch3/4',00
+
+;	※M80は領域を上書きしても警告が出ないので注意
+;	Math-Pack fixed patch 66a7h
+;
+	ORG 26a7h
+ppswrt:
+	pop af
+	ret
+	defb	'Math-PackPatch4/4',00
+
+
+	end	
+
