@@ -26,19 +26,21 @@ Data-Data間は10us程度のWaitが必要です、そのためLDIRは使えま�
 <function>  
 LEDCartridgeにコマンドを送信します。  
   
-	B   コマンドサイズ (1/2/4/9のみ有効)  
+	A   実行するコマンド
+	B   コマンドサイズ（送信データサイズ）
 	HL  送信CMDバッファーの先頭アドレス  
 
 	破壊されるレジスタ：  すべて  
 
-下記フォーマットでRAM上に置いてHLレジスタに先頭アドレス、  
-BレジスタにByteセットしCALLすれば、LED Cartridgeにコマンドがセットされます。  
-1-4Byte命令は、0-127の数値であること、9Byte命令は、BCD floatフォーマットなので注意してください。  
+各コマンドの引数は下記フォーマットでRAM上に置き、HLレジスタに先頭アドレス、  
+Aレジスタにはコマンド、Bレジスタに送信データサイズをセットしCALLすれば、LED Cartridgeにコマンドがセットされます。  
+送信データは、0-127の数値であることが必要です。ただし、9Byte指定のみ4ByteのBCD floatフォーマットが引数です。
 
-	1byte：'[CMD番号]'  
-	2byte：'[CMD番号] [parameter1(7bit 0-127)]'  
-	4byte：'[CMD番号] [parameter1(7bit 0-127)] [parameter2(7bit 0-127)] [parameter3(7bit 0-127)]'  
-	9byte：'[CMD番号] [BCD float数値(4byte)]' ※内部で8Byteに変換します  
+	1byte：無し  
+	2byte：'[parameter1(7bit 0-127)]'  
+	4byte：'[parameter1(7bit 0-127)] [parameter2(7bit 0-127)] [parameter3(7bit 0-127)]'  
+	9byte：'[BCD float数値(4byte)]' ※内部で8Byteに変換します  
+	その他：データの並び順に送信します。
 
 
 ## コマンド番号一覧  
@@ -82,3 +84,9 @@ BレジスタにByteセットしCALLすれば、LED Cartridgeにコマンドが�
 |cl_ee_get	| 039h | 2Byte | EEPROM Read |
 |cl_ee_cnf	| 03bh | 1Byte | EEPROM Config set |
 |cl_a_pause  | 03dh | 2Byte | AnimationMode pause |
+|cl_p_rgb	| 03fh | 5Byte | (V1.3～) Color Parameter set (RGB format) |
+|  |  |  |  |
+|cl_p_hsv	| 041h | 6Byte | (V1.3～)  Color Parameter set (HSV format) |
+|cl_null	| 043h | 1Byte |  (V1.3～) NULL CMD (Start CMDと共通なのでNULLにしている）  |
+|cl_p_rgball | 045h | 31Byte |  (V1.4～) ALL Color Parameter set & Draw(RGB)  |
+|cl_p_hsvall | 047h | 41Byte |  (V1.4～) ALL Color Parameter set & Draw(HSV) |

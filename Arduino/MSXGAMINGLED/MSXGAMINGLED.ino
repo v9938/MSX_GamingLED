@@ -1,9 +1,22 @@
+////////////////////////////////////////////////////////////////////////
+//
+// MSX Gaming Cartridge Control program
+// Copyright 2023 @V9938
+//	
+//	23/01/20 V1.0		1st version
+//	23/02/01 V1.1		CMD No0-29を実装
+//	23/02/03 V1.2		CMD No30を実装
+//	23/02/13 V1.3		CMD No31-32を実装
+//	23/02/14 V1.4		CMD No32-35を実装。
+//						割り込み周りの変数ハンドリング処理を変更。
+//
+////////////////////////////////////////////////////////////////////////
+
 #include <EEPROM.h>
-#include <MsTimer2.h>
 #include "aled.h"  // Indoor Corgi アドレサブルRGB LED制御ライブラリを使用
 
 //#define SERIALPRINT_DEBUG
-#define SERIALPRINT_ERROR
+//#define SERIALPRINT_ERROR
 
 //出荷時にLEDデモを有効にするか
 #define LEDDEMO_DEF_ENABLE
@@ -46,6 +59,7 @@ volatile uint16_t Ms2Count;
 
 volatile bool CmdEnable;
 unsigned char CmdHead;
+unsigned char CurrentCmdHead;
 
 unsigned char CmdOption;
 unsigned char CmdStatus;
@@ -74,7 +88,7 @@ bool ChangeValMode;
 bool ChangePosMode;
 
 bool ResetCmdLength;
-bool ResetCmdHead;
+bool ResetMsCount;
 
 float ChangeHueMode_sign;
 float  ChangeSatMode_sign;
@@ -95,9 +109,9 @@ uint8_t pushPattern;
 
 // COMMAND TABLE
 
-#define MAX_CMD 33
+#define MAX_CMD 36
 
-#define cl_null     0  // (2Byte) Debug Message
+#define cl_debugen  0  // (2Byte) Debug Message
 #define cl_off      1  // (1Byte) LED OFF/DEMO STOP  No1
 #define cl_draw     2  // (1Byte) LED draw       No2
 #define cl_pos      3  // (2Byte) LED position setting No3
@@ -135,13 +149,16 @@ uint8_t pushPattern;
 #define cl_ee_get   28  // (2Byte) EEPROM Read 
 #define cl_ee_cnf   29  // (1Byte) EEPROM Config set
 #define cl_a_pause  30  // (2Byte) AnimationMode pause
-#define cl_p_rgb    31  // (5Byte) Color Parameter set & Draw (RGB format)
+#define cl_p_rgb    31  // (5Byte) Color Parameter set (RGB format)
 
-#define cl_p_hsv  32  // (6Byte) Color Parameter set & Draw (HSV format)
+#define cl_p_hsv    32  // (6Byte) Color Parameter set (HSV format)
+#define cl_null     33  // (1Byte) NULL CMD (Start CMDと共通なのでNULLにしている） No33
+#define cl_p_rgball 34  // (31Byte) ALL Color Parameter set & Draw(RGB) No34
+#define cl_p_hsvall 35  // (41Byte)  ALL Color Parameter set & Draw(HSV) No35
 
 //Command長テーブル
 const unsigned char OptLength[MAX_CMD] = {	0x01,0x00,0x00,0x01, 0x01,0x00,0x03,0x08, 0x03,0x08,0x08,0x08, 
-0x08,0x01,0x00,0x00, 0x08,0x08,0x08,0x08, 0x01,0x01,0x01,0x01, 0x08,0x08,0x08,0x01, 0x01,0x00,0x01,0x04, 0x05};
+0x08,0x01,0x00,0x00, 0x08,0x08,0x08,0x08, 0x01,0x01,0x01,0x01, 0x08,0x08,0x08,0x01, 0x01,0x00,0x01,0x04, 0x05,0x00,0x1E,0x28};
 
 // アドレサブルRGB制御用のALEDクラスを使う
 //  デフォルトは全チャネルに同じデータを送信
@@ -176,10 +193,13 @@ void rgb2hsv(uint8_t red,uint8_t green,uint8_t blue){
 void clearCmd(){
 	if (CmdLength == CmdHead)  {
 
-		noInterrupts();
+//		noInterrupts();
+//		CmdHead = 0;
+//		CmdLength = 0;    // CMDバッファーリセット
+//		interrupts();
+
 		CmdHead = 0;
-		CmdLength = 0;    // CMDバッファーリセット
-		interrupts();
+		ResetCmdLength = true;		//Lengthリセット要求
 	}
 	timeOutEnable = false;
 	CmdStatus = WAIT_STARTCMD ;
@@ -202,21 +222,34 @@ void setup() {
 	digitalWrite(15,LOW);
 
 
+//割り込み設定
 	EICRA |= (3 << ISC00);    // Trigger on pos edge
 	EIMSK |= (1 << INT0);     // Enable external interrupt INT0 = pin3
 
-//割り込み設定
+	TCCR2A = 0;           
+	TCCR2B = 0;          
+	TCCR2A |= (1 << WGM21);   						//CTC mode
+	TCCR2B |= (1 << CS22)|(1 << CS21|(1 << CS20));  //分周1024
+	OCR2A   = 250-1;         						//250カウント=16ms
+	TIMSK2 |= (1 << OCIE2A);						//TIMER2割り込み有効
+
 	CmdLength = 0;    // CMDバッファーの長さ
 	MsCount = 0;      // 1msカウンター（CMD TimeOut管理用）
 	CmdHead = 0;
 	CmdStatus = WAIT_STARTCMD ;
 	timeOutEnable =false;
-
+	ResetCmdLength = true;
+	ResetMsCount = true;
+	
 //attachInterrupt(digitalPinToInterrupt(2),setcmd_func,RISING);
 
-	MsTimer2::set(16, ms_counter); // 16msカウント
-	MsTimer2::start();
-	sei();                    // Enable global interrupts
+//	MsTimer2::set(16, ms_counter); // 16msカウント
+//	MsTimer2::start();
+
+
+
+
+//	sei();                    // Enable global interrupts
 
 
 
@@ -227,12 +260,10 @@ void setup() {
 //    ; // wait for serial port to connect. Needed for native USB port only
 //  }
 	Serial.println("MSX Gaming LED System");
-	Serial.println("firmware rev 1.3(02/13/2023) @v9938");
+	Serial.println("firmware rev 1.4(02/14/2023) @v9938");
 
 //LED消灯
-	aled.pattern = ALED::patSingle;  // 全体フラッシュ
-	aled.color.val = 0.0f;
-	aled.draw();
+	aled.reset(true);
 
 // Temp Buffer初期化
 	pushHue = 360.0f;
@@ -274,16 +305,30 @@ void setup() {
 
 }
 
+void __INT0_vect(){};		//エディタの都合のDummy関数
 ISR(INT0_vect)//pin3
 {
+	if (ResetCmdLength) {
+		CmdLength = 0;
+		ResetCmdLength = false;
+	}
+	
 	CmdBufferB[CmdLength] = PINB;
 	CmdBufferD[CmdLength] = PIND;
 	CmdLength++;
 }
 
-void ms_counter(){
+void __TIMER2_COMPA_vect(){};		//エディタの都合のDummy関数
+ISR (TIMER2_COMPA_vect)
+//void ms_counter(){
+{
 	interrupts();     //INT0割り込みは最優先なので有効にしておく
-	MsCount++;
+	if (ResetMsCount) {
+		MsCount = 0;
+		ResetMsCount = false;
+	}else{
+		MsCount++;
+	}
 	Ms2Count++;
 }
 uint16_t marge16bit(uint16_t pos) {
@@ -755,7 +800,7 @@ void cmd_cl_debugen(){
 	EEPROM.put(0x10, DebugOut);
 
 }
-void cmd_cl_off(){
+void cmd_cl_off(){				//要：実行後Wait命令
 	uint8_t tmp_pt;
 	float tmp_val;
 
@@ -787,7 +832,7 @@ void cmd_cl_off(){
 
 }
 
-void cmd_cl_draw(){
+void cmd_cl_draw(){					////要：実行後Wait命令
 // LED描画
 	aled.draw();
 }
@@ -837,7 +882,7 @@ void cmd_cl_eepinit(){
 	eeprom_init();
 }
 
-void cmd_cl_demo(){
+void cmd_cl_demo(){				//要：実行後Wait命令
 // Demo モード設定
 
 	uint16_t value;
@@ -1100,8 +1145,27 @@ void cmd_cl_p_rgb(){
 //	aled.draw();
 }
 
+void cmd_cl_p_rgball(){
+//RGBモードで10LED分設定を一括で実施する
+
+	uint16_t r_value, g_value, b_value;
+	int i;
+
+// LEDポジションセット
+	for (i=0;i<10;i++){
+		r_value = (decodeCMD(CmdOption+i*3+0));
+		g_value = (decodeCMD(CmdOption+i*3+1));
+		b_value = (decodeCMD(CmdOption+i*3+2));
+		rgb2hsv(r_value,g_value,b_value);
+		aled.loadLedData(i,aled.color);
+	}
+	setLEDpos(0.0f);								//POS位置はとりあえず左にしておく
+	aled.draw();
+
+}
+
 void cmd_cl_p_hsv(){
-//hsvモードでのPOS/HSV/DRAWを一括で実施する
+//hsvモードでのPOS/HSVを10LED分一括で実施する
 //このコマンドでは他のHSV形式と違いuint値をもらいます。
 	uint16_t pos;
 // LEDポジションセット
@@ -1114,6 +1178,29 @@ void cmd_cl_p_hsv(){
 
 //	aled.draw();
 }
+void cmd_cl_null(){
+#ifdef SERIALPRINT_DEBUG
+		Serial.println("NULL CMD");
+#endif
+
+}
+
+void cmd_cl_p_hsvall(){
+//hsvモードでのPOS/HSVを一括で実施する
+//このコマンドでは他のHSV形式と違いuint値をもらいます。
+	int i;
+// LEDポジションセット
+	for (i=0;i<10;i++){
+		aled.color.hue = (float)((decodeCMD(CmdOption+i*4+0)>>1)+128*(decodeCMD(CmdOption+i*4+1)>>1));
+		aled.color.sat = (float)(decodeCMD(CmdOption+i*4+2)>>1);
+		aled.color.val = (float)(decodeCMD(CmdOption+i*4+3)>>1);
+		aled.loadLedData(i,aled.color);
+	}
+
+	setLEDpos(0.0f);								//POS位置はとりあえず左にしておく
+	aled.draw();
+}
+
 
 void cmd_cl_real(){
 	float temp;
@@ -1217,9 +1304,14 @@ void (*cmdExec[])(void)={
 	cmd_cl_ee_get,  // (2Byte) EEPROM Read No28
 	cmd_cl_ee_cnf,  // (1Byte) EEPROM Config set No29
 	cmd_cl_a_pause,	// (2Byte) AnimationMode pause No30
-	cmd_cl_p_rgb,	// (5Byte) Color Parameter set & Draw(RGB) No31
-	cmd_cl_p_hsv	// (6Byte) Color Parameter set & Draw(HSV) No32
+	cmd_cl_p_rgb,	// (5Byte) Color Parameter set(RGB) No31
+
+	cmd_cl_p_hsv,	// (6Byte) Color Parameter set(HSV) No32
+	cmd_cl_null,	// (1Byte) NULL CMD (Start CMDと共通なのでNULLにしている） No33
+	cmd_cl_p_rgball, // (31Byte) ALL Color Parameter set & Draw(RGB) No34
+	cmd_cl_p_hsvall	 // (41Byte)  ALL Color Parameter set & Draw(HSV) No35
 };
+
 void doCMD(){
 // 受信Command処理ルーチン
 // 内部のSwitchで更に細かい処理に分岐する
@@ -1345,38 +1437,42 @@ void ledAnimation() {
 //hue値の変化量
 void loop() {
 	char buf[60];
-
+	uint16_t tmpMsCount;
 
 	interrupts();													//割り込み許可
 
 // CMD関係の処理
-	if (CmdLength != CmdHead){										// CMD入力有り
-		timeOutEnable = true;										// TimeOut有効
-		CmdHead++;													// ポインタ更新
-		if ((MsCount + CMD_TIMEOUT) <  TimeOutMs) MsCount = 0;		// TimeOut値の計算結果が0戻りの場合の対策
-		TimeOutMs = MsCount + CMD_TIMEOUT;							// TimeOut値を設定
+	if ((ResetCmdLength==false) && (CmdLength != CmdHead)){				// CMD入力有り
+		timeOutEnable = true;											// TimeOutフラグを有効化
+		CurrentCmdHead = CmdHead;										// 今のHead位置を移す
+		CmdHead++;														// 次のSearch位置を更新
+		tmpMsCount = MsCount;											// TimeOut計測用カウンター値取得
+		if ((tmpMsCount + CMD_TIMEOUT) <  TimeOutMs){					// TimeOut値の計算結果が0戻りの場合の対策
+			 ResetMsCount = true;										// 次の割り込みでカウンターを初期化
+		}else{
+			TimeOutMs = MsCount + CMD_TIMEOUT;							// TimeOut値を設定
+		}
 
 		//CmdStatus: WAIT_STARTCMD(MagicWord待ち)
 		if (CmdStatus == WAIT_STARTCMD){
 			// Start CMDが来た時の処理
-			if ((decodeCMD(CmdHead-1))== 0x43)  {					// StartCMD:0x43
+			if ((decodeCMD(CurrentCmdHead))== 0x43)  {					// StartCMD:0x43
 				CmdStatus = WAIT_CMD ;								// 次のステータスへ
 			}else{
 			// Start CMD以外の書き込みがあった場合の処理（BIOSのRAM Searchとかで普通にある）
 #ifdef SERIALPRINT_DEBUG
-				sprintf(buf, "WAIT_STARTCMD Unknow: 0x%02x L: %d H: %d to: %d t:%d", (decodeCMD(CmdHead-1)),CmdLength,CmdHead,TimeOutMs,MsCount);
+				sprintf(buf, "WAIT_STARTCMD Unknow: 0x%02x L: %d H: %d to: %d t:%d", (decodeCMD(CurrentCmdHead)),CmdLength,CmdHead,TimeOutMs,MsCount);
 				Serial.println(buf);
 #endif
-				ErrorMS = 1;
+				ErrorMS = 1;															// 
 				clearCmd();																// 現在のCMDをclear
 			}
 		}else if (CmdStatus == WAIT_CMD){
 			//CmdStatus: WAIT_CMD(CMD書き込み待ち)
-//			digitalWrite(15,HIGH);														// Debug用
 
-			if (((decodeCMD(CmdHead-1))>>1) < MAX_CMD)  {								//CMDが有効範囲かチェック
+			if (((decodeCMD(CurrentCmdHead))>>1) < MAX_CMD)  {								//CMDが有効範囲かチェック
 
-				Cmd = (decodeCMD(CmdHead-1));
+				Cmd = (decodeCMD(CurrentCmdHead));
 				Cmd = (Cmd >>1) ;              											//CMD番号
 				CmdOption = CmdHead;    												//CMD オプションのスタート位置
 				CmdStatus = WAIT_CMDOPTION ;											//CMD OPTION待ちステータス
@@ -1385,14 +1481,13 @@ void loop() {
 				Serial.println(buf);
 #endif
 				if(OptLength[Cmd] == 0) {												//Option無しのCMDの場合即時実行
-//					digitalWrite(15,LOW);
 					doCMD();
 				}
 			}else{
 				// 範囲外の無効コマンドが来た場合
 #ifdef SERIALPRINT_ERROR
 				if (DebugOut){
-					sprintf(buf, "WAIT_CMD Unknow: 0x%02x L: %d H: %d to: %d t:%d", (decodeCMD(CmdHead-1)),CmdLength,CmdHead,TimeOutMs,MsCount);
+					sprintf(buf, "WAIT_CMD Unknow: 0x%02x L: %d H: %d to: %d t:%d", (decodeCMD(CurrentCmdHead)),CmdLength,CmdHead,TimeOutMs,MsCount);
 					Serial.println(buf);
 				}
 #endif
@@ -1403,7 +1498,6 @@ void loop() {
 			//CmdStatus: WAIT_CMDOPTION(CMDの引数が来るのを待つ)
 			if ((CmdOption+OptLength[Cmd]) == CmdHead) {	//CMD長まで来たら有効化
 
-//				digitalWrite(15,LOW);						//Debug用 (実行時間計測）
 				doCMD();									//CMD実行
 			}
 		}else{
@@ -1420,7 +1514,7 @@ void loop() {
 
 	// BufferのOverflow検出処理
 	// UART処理で時間がかからない限り通常ここは通らない。
-	if (CmdHead == CMDBUFFER_SIZE ){
+	if (CmdHead == CMDBUFFER_SIZE-1){
 		#ifdef SERIALPRINT_ERROR
 		if (DebugOut){
 			Serial.println("CMD Buffer Over");
@@ -1430,9 +1524,9 @@ void loop() {
 		ErrorMS = 1;
 		clearCmd();
 	}
+	//TimeOut処理
 
-
-	if ((timeOutEnable == true)&&(TimeOutMs < MsCount)){
+	if ((ResetMsCount==false)&&(timeOutEnable == true)&&(TimeOutMs < MsCount)){
 		//CMD Time Out 96ms
 #ifdef SERIALPRINT_ERROR
 		if(DebugOut){
@@ -1457,9 +1551,7 @@ void loop() {
 		
 
 		ChangeMs++;								//比較用カウンタ値更新
-		if((ChangeEnable)&&(CmdLength < CMDBUFFER_SIZE*2/3)) {				// Animation機能が有効の場合 
-																			// BUFFERが2/3を超えたらBUFFER処理を優先させる
-//			digitalWrite(16,HIGH);				//Debug用
+		if (ChangeEnable){	
 			if (LedDemoAll){					//Demopattern切り替え機能が有効の場合
 				if (DemoCountMs != DemoChangeTime) DemoCountMs++;			//デモ切り替え時間カウンタを更新
 				else {
@@ -1472,8 +1564,9 @@ void loop() {
 			}
 
 			ledAnimation();						//LEDのアニメーション処理
-			aled.draw();						//LED描画
-//			digitalWrite(16,LOW);				//Debug用
+			if ((ResetCmdLength==true) || (CmdHead== CmdLength)){					//CMDBufferにデータがある場合はそちらの処理を優先する
+				aled.draw();													//LED描画中は割り込みが無効でコマンドが受け取れないので注意(800us)
+			}
 		}
 	}
 
