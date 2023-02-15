@@ -1,6 +1,10 @@
 # MSX Gaming LED Cartridge  
 
+  
+<img src="./img/MSXLEDLOGO.png" width="30%" />  
+
 ![装置イメージ](./img/img001.jpg)  
+
 
 MSX Gaming LED Cartridgeは10個のRGB LEDを搭載した、Party Nightなカセットです。  
 MSX本体から拡張されたBASIC命令により10コのLEDは個別に点灯や色、点滅などのコントロールができ、  
@@ -8,11 +12,19 @@ MSX本体から拡張されたBASIC命令により10コのLEDは個別に点灯�
 
 
 ## ■ 使用イメージ
-<img src="./img/img005.jpg" width="40%" /> <img src="./img/img002.jpg" width="46%" />   
-<img src="./img/img003.jpg" width="40%" /> <img src="./img/img004.jpg" width="30%" /> 
+
+
+<img src="./img/img005.jpg" width="40%" /> <img src="./img/img002.jpg" width="46%" />  
+<img src="./img/img003.jpg" width="40%" /> <img src="./img/img004.jpg" width="30%" />  
 
 動画については下記URLを参照してください。  
 <https://twitter.com/i/status/1623682455151706112>
+
+## ■ 対応ソフトについて   
+2023/2月現在下記ソフトが対応しています。
+
+MGSP2(HRA!氏作)  
+<https://github.com/hra1129/mgsp2/tree/main/dos2_version>  
 
 ## ■ 頒布について   
 
