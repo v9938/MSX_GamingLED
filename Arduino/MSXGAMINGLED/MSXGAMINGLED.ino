@@ -9,6 +9,7 @@
 //	23/02/13 V1.3		CMD No31-32を実装
 //	23/02/14 V1.4		CMD No32-35を実装。
 //						割り込み周りの変数ハンドリング処理を変更。
+//	23/02/20 V1.5		LEDAの演算処理の計算式が誤っていたので修正
 //
 ////////////////////////////////////////////////////////////////////////
 
@@ -16,7 +17,7 @@
 #include "aled.h"  // Indoor Corgi アドレサブルRGB LED制御ライブラリを使用
 
 //#define SERIALPRINT_DEBUG
-//#define SERIALPRINT_ERROR
+#define SERIALPRINT_ERROR
 
 //出荷時にLEDデモを有効にするか
 #define LEDDEMO_DEF_ENABLE
@@ -260,7 +261,7 @@ void setup() {
 //    ; // wait for serial port to connect. Needed for native USB port only
 //  }
 	Serial.println("MSX Gaming LED System");
-	Serial.println("firmware rev 1.4(02/14/2023) @v9938");
+	Serial.println("firmware rev 1.5(02/20/2023) @v9938");
 
 //LED消灯
 	aled.reset(true);
@@ -1165,6 +1166,7 @@ void cmd_cl_p_rgball(){
 }
 
 void cmd_cl_p_hsv(){
+
 //hsvモードでのPOS/HSVを10LED分一括で実施する
 //このコマンドでは他のHSV形式と違いuint値をもらいます。
 	uint16_t pos;
@@ -1176,6 +1178,7 @@ void cmd_cl_p_hsv(){
 	aled.color.val = (float)(decodeCMD(CmdOption+4)>>1);
 	aled.loadLedData(pos,aled.color);
 
+	debugPrIntVal();
 //	aled.draw();
 }
 void cmd_cl_null(){
@@ -1337,44 +1340,49 @@ void ledAnimation() {
 // アニメーション用にパラメーターを更新する
 //   colorChange, posChange, valChange を使って color, pos , val を変更
 	aled.color.hue += (ChangeHueMode_sign * aled.colorChange.hue);
-	if (aled.color.hue > 360.0f) {
-		if (ChangeHueMode){
+	if (ChangeHueMode){
+		if (aled.color.hue > 359.999f) {
 			ChangeHueMode_sign = -1.0f;
-			aled.color.hue += 2*(ChangeHueMode_sign * aled.colorChange.hue);
-		}else{
+//			aled.color.hue += 2*(ChangeHueMode_sign * aled.colorChange.hue);
+			aled.color.hue = 720.0f-aled.color.hue;
+		}
+		if (aled.color.hue < 0.0f) {
+			ChangeHueMode_sign = 1.0f;
+//			aled.color.hue += 2*(ChangeHueMode_sign * aled.colorChange.hue);
+			aled.color.hue = -1.0f * aled.color.hue;
+		}
+		
+	}else{
+		if (aled.color.hue > 360.0f) {
 			ChangeHueMode_sign = 1.0f;
 			aled.color.hue -= 360.0f;
 		}
-	}
 
-	if (aled.color.hue < 0.0f) {
-		if (ChangeHueMode){
-			ChangeHueMode_sign = 1.0f;
-			aled.color.hue += 2*(ChangeHueMode_sign * aled.colorChange.hue);
-		}else{
+		if (aled.color.hue < 0.0f) {
 			ChangeHueMode_sign = 1.0f;
 			aled.color.hue += 360.0f;
 		}
 	}
 
 	aled.color.sat += (ChangeSatMode_sign * aled.colorChange.sat);
+
 	if (ChangeSatMode){
 		if (aled.color.sat > 99.999f){			//100.0fだと丸め誤差で0になる場合がある
 			ChangeSatMode_sign = -1.0f;
-			aled.color.sat += 2*(ChangeSatMode_sign * aled.colorChange.sat);
+//			aled.color.sat += 2*(ChangeSatMode_sign * aled.colorChange.sat);
+			aled.color.sat = 200.0f - aled.color.sat;
+		}
+		if (aled.color.sat < 0.0f){
+			ChangeSatMode_sign = 1.0f;
+//			aled.color.sat += 2*(ChangeSatMode_sign * aled.colorChange.sat);
+			aled.color.sat = -1.0f * aled.color.sat;
 		}
 	}else{
 		if (aled.color.sat > 100.0f){
 			ChangeSatMode_sign = 1.0f;
 			aled.color.sat -= 100.0f;
 		}
-	}
-
-	if (aled.color.sat < 0.0f){
-		if (ChangeSatMode){
-			ChangeSatMode_sign = 1.0f;
-			aled.color.sat += 2*(ChangeSatMode_sign * aled.colorChange.sat);
-		}else{
+		if (aled.color.sat < 0.0f){
 			ChangeSatMode_sign = 1.0f;
 			aled.color.sat += 100.0f;
 		}
@@ -1385,20 +1393,20 @@ void ledAnimation() {
 	if (ChangeValMode){
 		if (aled.color.val > 99.999f){			//100.0fだと丸め誤差で0になる場合がある
 			ChangeValMode_sign = -1.0f;
-			aled.color.val += 2*(ChangeValMode_sign * aled.colorChange.val);
+///			aled.color.val += 2*(ChangeValMode_sign * aled.colorChange.val);
+			aled.color.val = 200.0f -aled.color.val;
+		}
+		if (aled.color.val < 0.0f){
+			ChangeValMode_sign = 1.0f;
+//			aled.color.val += 2*(ChangeValMode_sign * aled.colorChange.val);
+			aled.color.val = -1.0f * aled.color.val;
 		}
 	}else{
 		if (aled.color.val > 100.0f) {
 			ChangeValMode_sign = 1.0f;
 			aled.color.val -= 100.0f;
 		}
-	}
-
-	if (aled.color.val < 0.0f){
-		if (ChangeValMode){
-			ChangeValMode_sign = 1.0f;
-			aled.color.val += 2*(ChangeValMode_sign * aled.colorChange.val);
-		}else{
+		if (aled.color.val < 0.0f){
 			ChangeValMode_sign = 1.0f;
 			aled.color.val += 100.0f;
 		}
@@ -1406,30 +1414,30 @@ void ledAnimation() {
 
 
 	aled.pos += (ChangePosMode_sign * aled.posChange);
+
 	if (ChangePosMode){
 		if (aled.pos > 99.999f){			//100.0fだと丸め誤差で0になる場合がある
 			ChangePosMode_sign = -1.0f;
-			aled.pos += 2*(ChangePosMode_sign * aled.posChange);
+//			aled.pos += 2*(ChangePosMode_sign * aled.posChange);
+			aled.pos = 200.0f - aled.pos;
+		}
+		if (aled.pos < 0.0f){
+			ChangePosMode_sign = 1.0f;
+//			aled.pos += 2*(ChangePosMode_sign * aled.posChange);
+			aled.pos = -1.0f * aled.pos;
 		}
 	}else{
-		if (aled.pos > 100.0f){
+		if (aled.pos > 100.00f){
 			ChangePosMode_sign = 1.0f;
 			aled.pos -= 100.0f;
 		}
-	}
-
-	if (ChangePosMode){
-		if (aled.pos < 0.0f){
-			ChangePosMode_sign = 1.0f;
-			aled.pos += 2*(ChangePosMode_sign * aled.posChange);
-		}
-	}else{
 		if (aled.pos < 0.0f){
 			ChangePosMode_sign = 1.0f;
 			aled.pos += 100.0f;
 		}
 	}
 
+//	debugPrIntVal();
 }
 
 

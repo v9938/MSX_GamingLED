@@ -9,7 +9,9 @@
 ;						_LEDPT系命令を追加
 ;						hue/sat/val値の引数をReal型に変更した
 ;	23/02/03 Ver 1.2 	_LEDA_PAUSE命令を追加
-;	
+;	23/02/20 Ver 1.3 	_LEDPT_RGB/_LEDPT_HSV命令を追加,
+;						DRAW系CMDに送信後WAIT処理を追加
+;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -57,11 +59,18 @@ rom_frestr	equ	67d0h	; get a pointer to string
 ;
 ;	Work area
 ;
-buf	equ	0f55eh		; line input buffer (used as a temp)
-valtyp	equ	0f663h		; value type
-dsctmp	equ	0f698h		; string descriptor temp
-dac	equ	0f7f6h			; decimal accumulator
-procnm	equ	0fd89h		; name of procedure
+buf			equ	0f55eh	; line input buffer (used as a temp)
+valtyp		equ	0f663h	; value type
+dsctmp		equ	0f698h	; string descriptor temp
+dac			equ	0f7f6h	; decimal accumulator
+procnm		equ	0fd89h	; name of procedure
+
+;
+;	IO Port
+;
+countlow	equ	0e6h	; 3.911us Counter
+counthigh	equ	0e7h	; 1ms Counter
+
 
 ;
 ;	Macros
@@ -91,15 +100,16 @@ chrget	macro
 ;  Data-Data間は10us程度のWaitが必要、そのためLDIRは使えない
 ;
 ;  0x4020のServiceルーチンを実行する場合はそこら辺を意識する必要は無い。
-;  下記フォーマットでRAM上に置いてHLレジスタに先頭アドレス、BにByte数でCALLすればOK
+;  下記フォーマットでRAM上に置いてHLレジスタに先頭アドレス、AにCMD番号、BにByte数でCALLすればOK
 ;  ※9Byte設定のみフォーマットが異なります。
 ;  1byte指定は'[CMD番号]'
 ;  2byte指定は'[CMD番号] [parameter1(7bit 0-127)]'
 ;  4byte指定は'[CMD番号] [parameter1(7bit 0-127)] [parameter2(7bit 0-127)] [parameter3(7bit 0-127)]'
 ;  9byte指定は'[CMD番号] [BCD float数値(4byte)]' ※内部で8Byteに変換します
 ;
-;  AVR側のBufferは64ByteMaxなので時間がかかる命令(_LED_DRAW/_LED_DEMOなど）実行後は少し時間を空けてください。
-;  上限にあたると以降は無効CMD扱いになります
+;  AVR側のBufferは64ByteMaxです。
+;  LEDへのデータ送信時割り込みが禁止される都合、描画系命令(_LED_OFF/_LED_DRAW/_LED_DEMOなど）実行後
+;  直ぐに命令を送ると8ms〜800us程度の間は命令が受信出来ない場合があります。
 
 
 
@@ -146,6 +156,14 @@ cl_ee_set	equ		037h ; (2Byte) EEPROM Write No27
 cl_ee_get	equ		039h ; (2Byte) EEPROM Read No28
 cl_ee_cnf	equ		03bh ; (1Byte) EEPROM Config set No29
 cl_a_pause  equ		03dh ; (2Byte) AnimationMode pause No30
+cl_p_rgb	equ		03fh ; (5Byte) Color Parameter set (RGB format)
+
+
+
+cl_p_hsv	equ		041h ; (6Byte) Color Parameter set (HSV format)
+cl_null		equ		043h ; (1Byte) NULL CMD (Start CMDと共通なのでNULLにしている） No33
+cl_p_rgball	equ		045h ; (31Byte) ALL Color Parameter set & Draw(RGB) No34
+cl_p_hsvall	equ		047h ; (41Byte)  ALL Color Parameter set & Draw(HSV) No35
 
 ledmem_io	equ		07f00h ; LED Mem IO
 
@@ -167,7 +185,7 @@ ledmem_io	equ		07f00h ; LED Mem IO
 ; 0x4010〜の文字列が'MSXLED"というスロットを探してください。
 ;	
 	defb	'MSXLED'			; 識別子 'MSXLED'
-	defw	0100h				; Version情報
+	defw	0130h				; Version情報
 
 	defw	0
 	defw	0
@@ -192,7 +210,7 @@ ledmem_io	equ		07f00h ; LED Mem IO
 
 
 ;JP Table2
-	ret
+	jp		j_wait10ms
 	nop
 	nop
 	nop
@@ -232,7 +250,7 @@ ledmem_io	equ		07f00h ; LED Mem IO
 ;
 
 	ORG 0C0h
-	defb	'MSX Gaming Cartridge BIOS v1.20 23/02/03 @v9938',00
+	defb	'MSX Gaming Cartridge BIOS v1.30 23/02/20 @v9938',00
 	ds		16,00h
 
 ;
@@ -377,6 +395,10 @@ command:
 	defw	ledpt_save
 	defb	'LEDPT_LOAD',0
 	defw	ledpt_load
+	defb	'LEDPT_RGB',0
+	defw	ledpt_rgb
+	defb	'LEDPT_HSV',0
+	defw	ledpt_hsv
 	
 	defb	0		; end of table
 
@@ -548,6 +570,7 @@ send_cmd2byte:
 	call write_wait
 	ld (hl),e			; CMDSET 2nd LED CMDの送信
 	call write_wait
+send_onemore:
 	ld (hl),l			; 0x00を送信
 	call write_wait
 	ld (hl),b			; CMDSET 3rd LED CMDの送信
@@ -738,9 +761,11 @@ ledoff:
 
 ;	ld e,cl_a_dis		;Animation OFF
 ;	call send_cmd1byte	;CMD送信
+	call j_wait10ms		;wait
 
 	ld e,cl_off			;CMDSET LED OFF/DEMO STOP
 	call send_cmd1byte  ;CMD送信
+	call j_wait10ms		;wait
 
 	pop	hl				; restore type of variable
 	ret
@@ -758,6 +783,7 @@ leddraw:
 						;(ルーチン終了時にhlのデータが00な事をチェックしている)
 	ld e,cl_draw		;LED draw
 	call send_cmd1byte  ;CMD送信
+	call j_wait10ms		;wait
 	pop	hl				; restore type of variable
 	ret
 
@@ -877,6 +903,8 @@ j_leddemo:
 
 	ld e,cl_demo		;LED DEMO
 	call send_cmd4byte	;CMD送信
+	call j_wait10ms		;wait
+
 	pop	hl				; restore type of variable
 	ret
 
@@ -1819,6 +1847,140 @@ ledpt_load:
 
 ;
 ;	<syntax>
+;		_LEDPT_RGB(<pos>,<r>,<g>,<b>)
+;
+;		引数：	pos = 0-9 LEDPosition
+;				r,g,b = 0-127 RGB値
+;	
+;	<function>
+;		LEDの位置指定でRGBモードの色情報をセットします。
+;
+ledpt_rgb:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 10				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	scf					;
+	rla					; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld b,a				; 引数保存
+
+	synchk	','			; カンマがあるかチェック
+
+	push bc
+	call	getbyt	; 引数(数値)を取得
+	pop bc
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld c,a			; 引数保存
+
+	synchk	','		; 括弧があるかチェック
+
+	push bc
+	call	getbyt	; 引数(数値)を取得
+	pop bc
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld d,a			; 引数保存
+
+	synchk	','		; 括弧があるかチェック
+
+	push de
+	push bc
+	call	getbyt	; 引数(数値)を取得
+	pop bc
+	pop de
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	scf				;
+	rla				; 1bit Left shift(0bit目は割り込み通知で使うので必ず1)
+	ld e,a			; 引数保存
+
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+	push de
+	ld e,cl_p_rgb		;Color Parameter set
+	call send_cmd4byte  ;CMD送信
+	pop de
+	ld b,e
+	call send_onemore  ;CMD送信
+	pop	hl				; restore type of variable
+	ret
+
+;
+;	<syntax>
+;		_LEDPT_HSV(<pos>,<hue>,<sat>,<val>)
+;
+;		引数：	pos = 0-9 LEDPosition
+;				hue = 0-360
+;				sat = 0-100
+;				val = 0-100
+;
+;	
+;	<function>
+;		LEDの位置指定でHSVモードの色情報をセットします。
+;
+ledpt_hsv:
+	synchk	'('			; 括弧があるかチェック
+	call	getbyt		; 引数(数値)を取得
+	cp 10				; 引数チェック
+	jp nc,oderr			; 引数が範囲外なのでError
+						; (ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld (BUF+011h),a 	; 引数保存 データ送信数が多いのでBUFをワークエリアとして使用
+						; 当該エリアは、BASIC実行中は保存される事を前提にしていないの
+						; 使って問題無い
+
+	synchk	','			; カンマがあるかチェック
+	call	frmqnt	; 引数(数値)を取得 戻り値はDE
+
+	push hl			; BASICの文字列ポインターを保存
+	ld hl,360		;
+	or a			; 
+	sbc hl,de		; HL-DE
+	jp c,oderr		; Error 桁あふれ 
+	ld a,e;
+	and 07fh
+	ld (BUF+012h),a ; 引数保存
+
+	ld a,e			;bit8処理
+	rlca
+	and 1			;bit8->bit1
+	ld (BUF+013h),a ; 引数保存
+	pop hl
+
+	synchk	','		; 括弧があるかチェック
+
+	call	getbyt	; 引数(数値)を取得
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	ld (BUF+014h),a ; 引数保存
+
+	synchk	','		; 括弧があるかチェック
+
+	call	getbyt	; 引数(数値)を取得
+
+	cp 128			; 引数チェック
+	jp nc,oderr		; 引数が範囲外なのでError
+	ld (BUF+015h),a ; 引数保存
+
+	synchk	')'
+	push hl				; hlは壊してはいけない/SPは-1してもOK
+						;(ルーチン終了時にhlのデータが00な事をチェックしている)
+	ld a,cl_p_hsv		;Color Parameter set
+	ld b,6
+	ld hl,BUF+011h
+	call j_sendUserCMD;
+	pop	hl				; restore type of variable
+	ret
+
+
+;
+;	<syntax>
 ;		_LEDA_PAUSE(<Value>)
 ;
 ;		引数：	val = 0 Animation動作　再開
@@ -1846,6 +2008,43 @@ leda_pause:
 	pop	hl				; restore type of variable
 	ret
 
+;	
+;	<function>
+;		10ms Wait Routine
+;
+
+
+j_wait10ms:
+	push af
+	push hl
+	
+	ld a,(msxver)		; ROM VERSION CHECK
+	cp 3				; MSX2+まではシステムタイマーが使えない
+	jr c,wait10ms		; 旧MSXシステム
+
+tr_wait10ms:
+	ld	h,10			;
+	in	a,(counthigh)
+	ld	l,a
+trWait_l:
+	in	a,(counthigh)
+	sub l
+	cp h
+	jr c,trWait_l
+	pop hl
+	pop af
+	ret
+	
+wait10ms:
+	ld hl,1278			;10ms (1278*28=35784 cycle)
+wait_l:
+	dec hl				;cycle += 6+1 (1)
+	ld a,l				;cycle += 4+1 (2)
+	or h				;cycle += 4+1 (3)
+	jp nz,wait_l		;cycle += 10+1 (6)
+	pop hl
+	pop af
+	ret					;17+10
 
 ; Serviceルーチン TEST Code
 led_sendTest2b:
@@ -1888,7 +2087,7 @@ led_sendTest0b:
 	push hl
 	ld a,cl_draw
 	ld b,1
-	ld hl,data2
+	ld hl,data2byte
 	call 04020h
 	pop hl
 	ret
