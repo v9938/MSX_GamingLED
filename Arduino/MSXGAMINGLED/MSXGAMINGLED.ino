@@ -17,13 +17,13 @@
 #include "aled.h"  // Indoor Corgi アドレサブルRGB LED制御ライブラリを使用
 
 //#define SERIALPRINT_DEBUG
-#define SERIALPRINT_ERROR
+//#define SERIALPRINT_ERROR
 
 //出荷時にLEDデモを有効にするか
 #define LEDDEMO_DEF_ENABLE
 
 //時間計測用のCMD IN/OUT有効化
-#define CMDINOUT_ENABLE
+//#define CMDINOUT_ENABLE
 
 #define setLEDpos(x) aled.pos = 5.0f + (float) x * 10.0f
 #define decodeCMD(i) 0xff & (((unsigned char)(CmdBufferD[i] >> 2)) | (CmdBufferB[i] << 6))

@@ -1,4 +1,4 @@
-# BASIC Sample program  
+# BASIC Game Sample program  
 MSXLEDのBASICサンプルプログラムです。
 
 あぶり６８００(@aburi6800)さんのGalaxy Zoneを使わせてもらいました。  

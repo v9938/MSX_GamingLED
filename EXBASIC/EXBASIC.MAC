@@ -11,6 +11,7 @@
 ;	23/02/03 Ver 1.2 	_LEDA_PAUSE命令を追加
 ;	23/02/20 Ver 1.3 	_LEDPT_RGB/_LEDPT_HSV命令を追加,
 ;						DRAW系CMDに送信後WAIT処理を追加
+;	23/02/22 Ver 1.4 	_TESTのコードをpatchで壊していたのを修正
 ;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -102,15 +103,17 @@ chrget	macro
 ;  0x4020のServiceルーチンを実行する場合はそこら辺を意識する必要は無い。
 ;  下記フォーマットでRAM上に置いてHLレジスタに先頭アドレス、AにCMD番号、BにByte数でCALLすればOK
 ;  ※9Byte設定のみフォーマットが異なります。
-;  1byte指定は'[CMD番号]'
-;  2byte指定は'[CMD番号] [parameter1(7bit 0-127)]'
-;  4byte指定は'[CMD番号] [parameter1(7bit 0-127)] [parameter2(7bit 0-127)] [parameter3(7bit 0-127)]'
-;  9byte指定は'[CMD番号] [BCD float数値(4byte)]' ※内部で8Byteに変換します
+;  1byte指定は、無しでOK
+;  2byte指定は'[parameter1(7bit 0-127)]'
+;  4byte指定は'[parameter1(7bit 0-127)] [parameter2(7bit 0-127)] [parameter3(7bit 0-127)]'
+;  9byte指定は'[BCD float数値(4byte)]' ※内部で8Byteに変換します
 ;
 ;  AVR側のBufferは64ByteMaxです。
 ;  LEDへのデータ送信時割り込みが禁止される都合、描画系命令(_LED_OFF/_LED_DRAW/_LED_DEMOなど）実行後
 ;  直ぐに命令を送ると8ms〜800us程度の間は命令が受信出来ない場合があります。
-
+;  
+;  V1.30以降については4024hに10msWaitのServiceRoutineを用意しています。
+;  それを使ってもらっても構いません。
 
 
 ; CMD番号一覧
@@ -185,7 +188,7 @@ ledmem_io	equ		07f00h ; LED Mem IO
 ; 0x4010〜の文字列が'MSXLED"というスロットを探してください。
 ;	
 	defb	'MSXLED'			; 識別子 'MSXLED'
-	defw	0130h				; Version情報
+	defw	0140h				; Version情報
 
 	defw	0
 	defw	0
@@ -211,8 +214,6 @@ ledmem_io	equ		07f00h ; LED Mem IO
 
 ;JP Table2
 	jp		j_wait10ms
-	nop
-	nop
 	nop
 
 ;JP Table3
@@ -250,7 +251,7 @@ ledmem_io	equ		07f00h ; LED Mem IO
 ;
 
 	ORG 0C0h
-	defb	'MSX Gaming Cartridge BIOS v1.30 23/02/20 @v9938',00
+	defb	'MSX Gaming Cartridge BIOS v1.40 23/02/22 @v9938',00
 	ds		16,00h
 
 ;
@@ -1249,6 +1250,15 @@ repnum_fixed:		;
 	pop	hl				; restore type of variable
 	ret
 
+;	※M80は領域を上書きしても警告が出ないので注意
+;	Math-Pack fixed patch 4666h
+;
+	ORG 0666h
+	jp	calbas
+	defb	'Math-PackPatch2/4',00
+
+	ORG 0680h
+
 ;
 ;	<syntax>
 ;		_LEDTEST (<val>)
@@ -1280,14 +1290,6 @@ ledtest:
 	ret
 
 
-;	※M80は領域を上書きしても警告が出ないので注意
-;	Math-Pack fixed patch 4666h
-;
-	ORG 0666h
-	jp	calbas
-	defb	'Math-PackPatch2/4',00
-
-	ORG 0680h
 
 
 ;

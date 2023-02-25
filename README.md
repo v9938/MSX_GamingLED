@@ -13,9 +13,8 @@ MSX本体から拡張されたBASIC命令により10コのLEDは個別に点灯�
 
 ## ■ 使用イメージ
 
-
-<img src="./img/img005.jpg" width="40%" /> <img src="./img/img002.jpg" width="46%" />  
-<img src="./img/img003.jpg" width="40%" /> <img src="./img/img004.jpg" width="30%" />  
+<img src="./img/img005.jpg" width="45%" /> <img src="./img/img004.jpg" width="45%" />  
+<img src="./img/img006.jpg" width="45%" /> <img src="./img/img003.jpg" width="45%" />   
 
 動画については下記URLを参照してください。  
 <https://twitter.com/i/status/1623682455151706112>
@@ -63,7 +62,11 @@ AVRマイコンへのプログラム書き込みが必要ですのでArduinoの�
 [LED拡張BASIC仕様書](./EXBASIC/led_exbasic.md)  
 [MSXLED仕様書](./EXBASIC/msxled_bios.md)
 
-## ■ 組み立て説明書について（準備中)
+使い方のサンプルは下記を参照してください。  
+[BASIC Game Sample](https://github.com/v9938/MSX_GamingLED/tree/main/SampleGame)  
+[BASIC/MSX-DOS Sample](https://github.com/v9938/MSX_GamingLED/tree/main/SampleApplication)  
+
+## ■ 組み立て説明書について  
 下記を参照ください。  
 
 [組み立て説明書](./AssemblyManual/Assembly.md)
