@@ -49,11 +49,16 @@ AVRマイコンへのプログラム書き込みが必要ですのでArduinoの�
 
 ### 家電のKENちゃん  
 
-未定
+全パーツ入りセット
+<https://www.kadenken.com/view/item/000000001542?category_page_id=ct169>
+
+ROM+基板のみ
+<https://www.kadenken.com/view/item/000000001541?category_page_id=ct169>
+
 
 ### Booth: (週１回の発送)  
-未定
 
+未定
 
 ## ■ BASIC拡張命令およびプログラムからの制御方法について
 
